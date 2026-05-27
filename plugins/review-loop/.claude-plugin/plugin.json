@@ -1,6 +1,6 @@
 {
     "name": "review-loop",
-    "version": "1.8.1",
+    "version": "1.8.2",
     "description": "Automated code review loop: Claude implements, Codex reviews independently, Claude addresses feedback",
     "author": {
         "name": "Hamel Husain"

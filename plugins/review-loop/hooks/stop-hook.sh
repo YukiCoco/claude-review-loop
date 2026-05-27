@@ -82,11 +82,46 @@ build_review_prompt() {
   # ── Scope block (PR-bound or branch-bound fallback) ──
   local SCOPE_BLOCK
   if [ -n "$PR_URL" ]; then
+    # Classify the PR URL: GitHub uses /pull/<n>, Gitea uses /pulls/<n>.
+    local pr_host="" pr_owner="" pr_repo="" pr_number=""
+    if [[ "$PR_URL" =~ ^https?://github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+      pr_host="github"
+      pr_owner="${BASH_REMATCH[1]}"
+      pr_repo="${BASH_REMATCH[2]}"
+      pr_number="${BASH_REMATCH[3]}"
+    elif [[ "$PR_URL" =~ ^https?://[^/]+/([^/]+)/([^/]+)/pulls/([0-9]+) ]]; then
+      pr_host="gitea"
+      pr_owner="${BASH_REMATCH[1]}"
+      pr_repo="${BASH_REMATCH[2]}"
+      pr_number="${BASH_REMATCH[3]}"
+    else
+      pr_host="unknown"
+    fi
+    log "PR URL classification: host=$pr_host, owner=$pr_owner, repo=$pr_repo, number=$pr_number"
+
+    local FETCH_CMDS
+    case "$pr_host" in
+      github)
+        FETCH_CMDS="  - \`gh pr diff ${PR_URL}\` — unified diff for the PR.
+  - \`gh pr view ${PR_URL} --json files,baseRefName,headRefName,title,body\` — file list, base branch, title, body."
+        ;;
+      gitea)
+        FETCH_CMDS="  - \`tea api /repos/${pr_owner}/${pr_repo}/pulls/${pr_number}.diff\` — unified diff for the PR.
+  - \`tea api /repos/${pr_owner}/${pr_repo}/pulls/${pr_number}\` — PR metadata as JSON (base branch, head, title, body).
+  - \`tea api /repos/${pr_owner}/${pr_repo}/pulls/${pr_number}/files\` — list of changed files.
+  Notes: \`tea\` reads auth from its active login (\`tea login default\`); ensure a login exists for this Gitea host. From inside this repo you can also use \`tea pr ${pr_number}\` family commands without --repo."
+        ;;
+      *)
+        FETCH_CMDS="  - If the remote is GitHub: \`gh pr diff ${PR_URL}\` and \`gh pr view ${PR_URL} --json files,baseRefName,headRefName,title,body\`.
+  - If the remote is Gitea: parse <owner>/<repo>/<number> from the URL, then \`tea api /repos/<owner>/<repo>/pulls/<number>.diff\` (diff) and \`tea api /repos/<owner>/<repo>/pulls/<number>\` (metadata) plus \`/files\` for the file list.
+  - Inspect \`git remote -v\` if you're not sure which CLI applies."
+        ;;
+    esac
+
     SCOPE_BLOCK="SCOPE (STRICT): This review is bound to a single pull request: ${PR_URL}
 
-Before doing anything else, determine the exact files and line ranges in scope:
-  - Run \`gh pr diff ${PR_URL}\` to get the unified diff for this PR.
-  - Run \`gh pr view ${PR_URL} --json files,baseRefName,headRefName,title,body\` to get the file list, base branch, and PR description.
+Before doing anything else, determine the exact files and line ranges in scope using whichever of these commands matches the host (gh for GitHub, tea for Gitea):
+${FETCH_CMDS}
 
 The in-scope set is EXACTLY the files (and line ranges within them) modified by this PR. Do NOT flag issues in:
   - Files not touched by this PR.
@@ -119,7 +154,7 @@ PREAMBLE_EOF
 ---
 AGENT 1: Diff Review (focus ONLY on files/lines changed by this PR)
 
-Re-derive the in-scope set from the SCOPE block above (use `gh pr diff <PR_URL>` when a PR URL is given, otherwise `git diff <merge-base>...HEAD`). Review EXCLUSIVELY the code introduced or modified by this PR. Do not stray into unchanged files or unchanged lines.
+Re-derive the in-scope set from the SCOPE block above using the commands it lists (`gh pr diff …` for GitHub PRs, `tea api …/pulls/<n>.diff` for Gitea PRs; fall back to `git diff <merge-base>...HEAD` only if no PR URL is given). Review EXCLUSIVELY the code introduced or modified by this PR. Do not stray into unchanged files or unchanged lines.
 
 Review criteria for changed code:
 
@@ -154,7 +189,7 @@ DIFF_EOF
 ---
 AGENT 2: Spec Compliance Review (verify this PR's implementation matches the spec)
 
-Find and read the task specification and plan files — especially `SPEC.md`, `PLAN.md`, and the PR description (`gh pr view <PR_URL> --json body`). If no explicit spec exists, reconstruct the intended requirements from the review-loop task description, README, tests, and changed code, then clearly state that the spec was inferred.
+Find and read the task specification and plan files — especially `SPEC.md`, `PLAN.md`, and the PR description (fetch it via the host-appropriate command from the SCOPE block: `gh pr view <PR_URL> --json body` for GitHub, `tea api /repos/<owner>/<repo>/pulls/<number>` for Gitea). If no explicit spec exists, reconstruct the intended requirements from the review-loop task description, README, tests, and changed code, then clearly state that the spec was inferred.
 
 Constrain your review to whether THIS PR's changes satisfy the spec. Do not flag spec items that are unrelated to the files this PR touches, and do not propose work that belongs in a separate PR.
 
