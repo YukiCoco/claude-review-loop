@@ -90,9 +90,9 @@ PREAMBLE_EOF
   # ── Agent 1: Diff Review ──
   cat << 'DIFF_EOF'
 ---
-AGENT 1: Diff Review (focus on uncommitted and recently committed changes ONLY)
+AGENT 1: Diff Review (focus ONLY on changes in the current branch)
 
-Run `git diff` and `git diff --cached` to see all uncommitted changes. Also run `git log --oneline -5` and `git diff HEAD~5` for recently committed work. Focus your review EXCLUSIVELY on this changed code.
+Identify the current branch and its upstream/base branch, then review all changes introduced by the current branch, including committed, staged, and unstaged changes. Use commands such as `git status`, `git branch --show-current`, `git merge-base HEAD origin/main` or the appropriate upstream/base branch, `git diff <merge-base>...HEAD`, `git diff`, and `git diff --cached`. Focus your review EXCLUSIVELY on code changed in the current branch.
 
 Review criteria for changed code:
 
@@ -122,10 +122,40 @@ For each issue: return file path, line number, severity (critical/high/medium/lo
 
 DIFF_EOF
 
-  # ── Agent 2: Holistic Review ──
+  # ── Agent 2: Spec Compliance Review ──
+  cat << 'SPEC_EOF'
+---
+AGENT 2: Spec Compliance Review (verify the implementation matches the spec)
+
+Find and read the task specification and plan files, especially `SPEC.md` and `PLAN.md` if present. If no explicit spec exists, reconstruct the intended requirements from the review-loop task description, README, tests, and changed code, then clearly state that the spec was inferred.
+
+Review whether the implemented functionality correctly satisfies the spec:
+
+Spec Alignment:
+- Are all functional requirements and acceptance criteria implemented?
+- Are there missing behaviors, incomplete flows, or TODO/stub implementations?
+- Does the implementation match the intended user-facing behavior, inputs, outputs, and error handling?
+- Are edge cases from the spec handled correctly?
+- Did the implementation introduce behavior that contradicts or exceeds the spec in risky ways?
+
+Plan Completion:
+- Are all major plan steps completed?
+- If the plan changed during implementation, is the final behavior still consistent with the spec?
+- Are any documented follow-ups actually required before the task can be considered done?
+
+Verification:
+- Are there tests that prove the spec requirements are met?
+- Do tests cover the main acceptance criteria and important edge cases?
+- If relevant tests are missing, identify the exact spec behavior that lacks coverage.
+
+For each issue: return file path, line number when available, severity (critical/high/medium/low), category, description, the unmet spec requirement, and suggested fix.
+
+SPEC_EOF
+
+  # ── Agent 3: Holistic Review ──
   cat << 'HOLISTIC_EOF'
 ---
-AGENT 2: Holistic Review (evaluate overall project structure and agent readiness)
+AGENT 3: Holistic Review (evaluate overall project structure and agent readiness)
 
 Read the full project directory structure, key config files, README, and any AGENTS.md / CLAUDE.md files. This is NOT about individual line changes — it's about whether the project is well-structured for maintainability and agent-driven development.
 
@@ -139,12 +169,8 @@ Code Organization & Modularity:
 - Are import paths clean (absolute imports, no deep relative paths)?
 
 Documentation & Agent Harness:
-- Does every major directory have an AGENTS.md with operating guidelines for agents?
-- Is there a CLAUDE.md symlinked to each AGENTS.md for Claude Code compatibility?
-- Do AGENTS.md files document: conventions, file purposes, testing patterns, common pitfalls?
 - Is there telemetry/observability instrumentation (logging, metrics, tracing)?
 - Is there a type system in use (TypeScript, Python type hints, etc.) with proper coverage?
-- Are there proper constraints and guardrails so agents working on the code are set up for success?
 - Are environment variables documented and validated at startup?
 - Are there clear boundaries between server-only and client-safe code?
 
@@ -158,11 +184,11 @@ For each issue: return file path (or directory), severity (critical/high/medium/
 
 HOLISTIC_EOF
 
-  # ── Agent 3: Next.js Best Practices (conditional) ──
+  # ── Agent 4: Next.js Best Practices (conditional) ──
   if [ "$IS_NEXTJS" = "true" ]; then
     cat << 'NEXTJS_EOF'
 ---
-AGENT 3: Next.js & React Best Practices Review
+AGENT 4: Next.js & React Best Practices Review
 
 This is a Next.js project. Review the codebase against these specific patterns:
 
@@ -245,7 +271,7 @@ CONSOLIDATION INSTRUCTIONS (after all agents complete):
 4. For each finding, include:
    - File path and line number (or directory for structural issues)
    - Severity: critical / high / medium / low
-   - Category: which review path found it (Diff, Holistic, Next.js, UX)
+   - Category: which review path found it (Diff, Spec Compliance, Holistic, Next.js, UX)
    - Description: clear explanation
    - Suggested fix: concrete, actionable recommendation
 5. End with a summary: total issues, breakdown by severity, agents that ran, overall assessment

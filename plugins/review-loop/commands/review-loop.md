@@ -26,7 +26,7 @@ STATE_EOF
 echo "Review Loop activated (ID: ${REVIEW_ID})"
 ```
 
-After setup completes successfully, proceed to implement the task described in the arguments. Work thoroughly and completely — write clean, well-structured, well-tested code.
+After setup completes successfully, assess the task complexity. For complex tasks, use the `using-superpowers` skill to write a spec and plan first, then implement using Test-Driven Development (TDD): write tests first, make them pass, then refactor. For simple tasks, skip `using-superpowers` and implement directly using TDD. Work thoroughly and completely — write clean, well-structured, well-tested code.
 
 When you believe the task is fully done, stop. The review loop stop hook will automatically:
 1. Prepare a Codex runner script and prompt file
