@@ -38,6 +38,7 @@ parse_field() {
 ACTIVE=$(parse_field "active")
 PHASE=$(parse_field "phase")
 REVIEW_ID=$(parse_field "review_id")
+RELATED_PR=$(parse_field "related_pr")
 
 # Not active → clean up and exit
 if [ "$ACTIVE" != "true" ]; then
@@ -69,19 +70,45 @@ detect_browser_ui() {
 # ── Build the multi-agent review prompt ───────────────────────────────────
 build_review_prompt() {
   local REVIEW_FILE="$1"
+  local PR_URL="$2"
 
   local IS_NEXTJS=false
   local HAS_UI=false
   detect_nextjs && IS_NEXTJS=true
   detect_browser_ui && HAS_UI=true
 
-  log "Project detection: nextjs=$IS_NEXTJS, browser_ui=$HAS_UI"
+  log "Project detection: nextjs=$IS_NEXTJS, browser_ui=$HAS_UI, pr=$PR_URL"
+
+  # ── Scope block (PR-bound or branch-bound fallback) ──
+  local SCOPE_BLOCK
+  if [ -n "$PR_URL" ]; then
+    SCOPE_BLOCK="SCOPE (STRICT): This review is bound to a single pull request: ${PR_URL}
+
+Before doing anything else, determine the exact files and line ranges in scope:
+  - Run \`gh pr diff ${PR_URL}\` to get the unified diff for this PR.
+  - Run \`gh pr view ${PR_URL} --json files,baseRefName,headRefName,title,body\` to get the file list, base branch, and PR description.
+
+The in-scope set is EXACTLY the files (and line ranges within them) modified by this PR. Do NOT flag issues in:
+  - Files not touched by this PR.
+  - Pre-existing issues in touched files that are outside the changed line ranges, unless the PR's changes directly depend on or activate them.
+  - Repo-wide structural / organizational concerns that are not introduced or worsened by this PR.
+
+If a concern is tempting but out of scope, DROP IT. \"Out of scope\" trumps \"would be nice.\""
+  else
+    SCOPE_BLOCK="SCOPE (STRICT): No PR URL was recorded. Fall back to reviewing only the current branch's diff against its base.
+
+Determine in-scope files/lines via: \`git branch --show-current\`, \`git merge-base HEAD origin/main\` (or the appropriate base), and \`git diff <merge-base>...HEAD\`. Include staged and unstaged changes (\`git diff\`, \`git diff --cached\`) as part of the same scope.
+
+Do NOT flag issues outside the changed files/line ranges, and do NOT flag repo-wide structural concerns that this branch did not introduce."
+  fi
 
   # ── Preamble ──
   cat << PREAMBLE_EOF
-You are orchestrating a thorough, independent code review of recent changes in this repository.
+You are orchestrating a thorough, independent code review of a single pull request in this repository.
 
-Use multi-agent to run the following review agents IN PARALLEL. Each agent should return its findings as structured text (not write to files). After ALL agents complete, consolidate their findings into a single deduplicated review file.
+${SCOPE_BLOCK}
+
+Use multi-agent to run the following review agents IN PARALLEL. Each agent MUST respect the SCOPE block above and return its findings as structured text (not write to files). After ALL agents complete, consolidate their findings into a single deduplicated review file. During consolidation, drop any finding that is out of scope per the SCOPE block.
 
 IMPORTANT: Spawn one agent per review path below. Wait for all agents to finish. Then deduplicate overlapping findings and write the consolidated review to: ${REVIEW_FILE}
 
@@ -90,9 +117,9 @@ PREAMBLE_EOF
   # ── Agent 1: Diff Review ──
   cat << 'DIFF_EOF'
 ---
-AGENT 1: Diff Review (focus ONLY on changes in the current branch)
+AGENT 1: Diff Review (focus ONLY on files/lines changed by this PR)
 
-Identify the current branch and its upstream/base branch, then review all changes introduced by the current branch, including committed, staged, and unstaged changes. Use commands such as `git status`, `git branch --show-current`, `git merge-base HEAD origin/main` or the appropriate upstream/base branch, `git diff <merge-base>...HEAD`, `git diff`, and `git diff --cached`. Focus your review EXCLUSIVELY on code changed in the current branch.
+Re-derive the in-scope set from the SCOPE block above (use `gh pr diff <PR_URL>` when a PR URL is given, otherwise `git diff <merge-base>...HEAD`). Review EXCLUSIVELY the code introduced or modified by this PR. Do not stray into unchanged files or unchanged lines.
 
 Review criteria for changed code:
 
@@ -125,9 +152,11 @@ DIFF_EOF
   # ── Agent 2: Spec Compliance Review ──
   cat << 'SPEC_EOF'
 ---
-AGENT 2: Spec Compliance Review (verify the implementation matches the spec)
+AGENT 2: Spec Compliance Review (verify this PR's implementation matches the spec)
 
-Find and read the task specification and plan files, especially `SPEC.md` and `PLAN.md` if present. If no explicit spec exists, reconstruct the intended requirements from the review-loop task description, README, tests, and changed code, then clearly state that the spec was inferred.
+Find and read the task specification and plan files — especially `SPEC.md`, `PLAN.md`, and the PR description (`gh pr view <PR_URL> --json body`). If no explicit spec exists, reconstruct the intended requirements from the review-loop task description, README, tests, and changed code, then clearly state that the spec was inferred.
+
+Constrain your review to whether THIS PR's changes satisfy the spec. Do not flag spec items that are unrelated to the files this PR touches, and do not propose work that belongs in a separate PR.
 
 Review whether the implemented functionality correctly satisfies the spec:
 
@@ -152,35 +181,36 @@ For each issue: return file path, line number when available, severity (critical
 
 SPEC_EOF
 
-  # ── Agent 3: Holistic Review ──
+  # ── Agent 3: Integration Review (scoped to PR-touched files) ──
   cat << 'HOLISTIC_EOF'
 ---
-AGENT 3: Holistic Review (evaluate overall project structure and agent readiness)
+AGENT 3: Integration Review (how THIS PR fits the surrounding code it touches)
 
-Read the full project directory structure, key config files, README, and any AGENTS.md / CLAUDE.md files. This is NOT about individual line changes — it's about whether the project is well-structured for maintainability and agent-driven development.
+This agent is NOT a project-wide audit. It evaluates how the PR's changes integrate with the modules, files, and contracts they actually touch. Read each PR-modified file in full (not just the diff hunk) to understand the immediate context, and skim the direct callers/callees of changed symbols. Do NOT venture beyond that into unrelated parts of the repo.
 
-Review criteria for the whole project:
+Review criteria — strictly scoped to PR-modified files and their direct neighbors:
 
-Code Organization & Modularity:
-- Is the project structure logical and navigable? Can a new developer (or agent) find things?
-- Are concerns properly separated (data access, business logic, presentation, config)?
-- Are there god files/functions that do too much and should be split?
-- Is shared code properly extracted into reusable modules?
-- Are import paths clean (absolute imports, no deep relative paths)?
+Local Fit:
+- Do the changed files still feel cohesive after this PR, or did the change introduce a god file / mixed responsibilities?
+- Are new functions/types placed in the right file given the existing structure of the modules being modified?
+- Is shared logic in this PR reused appropriately, or did it copy-paste from an existing helper in a touched file?
+- Are names introduced by this PR consistent with the conventions already used in the touched files?
 
-Documentation & Agent Harness:
-- Is there telemetry/observability instrumentation (logging, metrics, tracing)?
-- Is there a type system in use (TypeScript, Python type hints, etc.) with proper coverage?
-- Are environment variables documented and validated at startup?
-- Are there clear boundaries between server-only and client-safe code?
+Contracts & Callers:
+- Do the PR's changes break the public contract of any modified module (signatures, return shapes, error semantics)?
+- If the PR changed a function/type, are its direct callers in the repo still correct? (Grep for usages of changed symbols.)
+- Are new error paths handled consistently with how the touched files already handle errors?
 
-Architecture:
-- Is the dependency graph clean (no circular dependencies)?
-- Are external integrations properly abstracted behind interfaces?
-- Is configuration centralized rather than scattered?
-- Is error handling consistent across the codebase?
+Configuration & Boundaries (only if THIS PR touches them):
+- If the PR adds env vars, are they documented/validated in the same place the surrounding code documents/validates env vars?
+- If the PR changes server/client boundaries in touched files, are the boundaries still correct?
 
-For each issue: return file path (or directory), severity (critical/high/medium/low), category, description, and suggested fix.
+Out of scope (DO NOT flag):
+- Pre-existing structural problems in untouched files.
+- Repo-wide concerns this PR did not introduce or worsen.
+- "While you're here, you should also refactor X" suggestions.
+
+For each issue: return file path, line number when available, severity (critical/high/medium/low), category, description, and suggested fix. If you have no in-scope findings, say so explicitly rather than padding with out-of-scope observations.
 
 HOLISTIC_EOF
 
@@ -190,7 +220,9 @@ HOLISTIC_EOF
 ---
 AGENT 4: Next.js & React Best Practices Review
 
-This is a Next.js project. Review the codebase against these specific patterns:
+This is a Next.js project. Review ONLY the files modified by this PR against the patterns below. Do not flag pre-existing violations in untouched files. If a touched file has a pre-existing violation that the PR's changes activate or worsen, you may flag it and say so explicitly.
+
+Patterns to check (only within PR-modified files):
 
 App Router & Server Components:
 - Are Server Components used by default? Is 'use client' only added when interactivity is needed?
@@ -240,12 +272,12 @@ NEXTJS_EOF
 ---
 AGENT (UX): Browser-Based UX Review (SKIP if you cannot access a running dev server)
 
-If the project has a running dev server, use agent-browser to test the UI.
+If the project has a running dev server, use agent-browser to test ONLY the UI surfaces this PR touches (routes/components in files modified by the PR, and the user flows that pass through them). Do not audit unrelated parts of the app.
 Install agent-browser if needed: npm install -g agent-browser (or: brew install agent-browser)
 
-Testing checklist:
-- Navigate to all major routes/pages
-- Test key user workflows end-to-end (signup, login, CRUD operations, etc.)
+Testing checklist (scoped to the PR's affected UI):
+- Navigate to the routes/pages whose source files this PR modified
+- Test user workflows that go through PR-modified components end-to-end
 - Take screenshots at desktop (1280x720) and mobile (375x812) viewports
 - Check for: broken layouts, missing error states, loading states, empty states
 - Verify accessibility: keyboard navigation, focus indicators, color contrast
@@ -265,17 +297,18 @@ UX_EOF
 ---
 CONSOLIDATION INSTRUCTIONS (after all agents complete):
 
-1. Collect all findings from all agents
-2. Deduplicate: if multiple agents flagged the same issue, keep the most detailed version
-3. Organize all findings by severity (critical first, then high, medium, low)
-4. For each finding, include:
-   - File path and line number (or directory for structural issues)
+1. Collect all findings from all agents.
+2. Apply the SCOPE block as a HARD filter: drop any finding whose file/line is not part of this PR's diff, and any finding that is a repo-wide observation the PR did not introduce or worsen. When in doubt, drop it.
+3. Deduplicate: if multiple agents flagged the same issue, keep the most detailed version.
+4. Organize the remaining (in-scope) findings by severity (critical first, then high, medium, low).
+5. For each finding, include:
+   - File path and line number
    - Severity: critical / high / medium / low
-   - Category: which review path found it (Diff, Spec Compliance, Holistic, Next.js, UX)
+   - Category: which review path found it (Diff, Spec Compliance, Integration, Next.js, UX)
    - Description: clear explanation
    - Suggested fix: concrete, actionable recommendation
-5. End with a summary: total issues, breakdown by severity, agents that ran, overall assessment
-6. Write the COMPLETE consolidated review to: ${REVIEW_FILE}
+6. End with a summary: total in-scope issues, breakdown by severity, agents that ran, overall assessment. If you dropped findings as out-of-scope, mention the count but do NOT list them.
+7. Write the COMPLETE consolidated review to: ${REVIEW_FILE}
 
 IMPORTANT: You MUST create the file ${REVIEW_FILE} with the full review.
 CONSOLIDATION_EOF
@@ -315,7 +348,7 @@ case "$PHASE" in
     REVIEW_FILE="reviews/review-${REVIEW_ID}.md"
     mkdir -p reviews
 
-    CODEX_PROMPT=$(build_review_prompt "$REVIEW_FILE")
+    CODEX_PROMPT=$(build_review_prompt "$REVIEW_FILE" "$RELATED_PR")
 
     CODEX_FLAGS="${REVIEW_LOOP_CODEX_FLAGS:---dangerously-bypass-approvals-and-sandbox}"
 

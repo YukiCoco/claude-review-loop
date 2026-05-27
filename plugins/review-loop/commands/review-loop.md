@@ -28,8 +28,19 @@ echo "Review Loop activated (ID: ${REVIEW_ID})"
 
 After setup completes successfully, assess the task complexity. For complex tasks, use the `using-superpowers` skill to write a spec and plan first, then implement using Test-Driven Development (TDD): write tests first, make them pass, then refactor. For simple tasks, skip `using-superpowers` and implement directly using TDD. Work thoroughly and completely — write clean, well-structured, well-tested code.
 
-When you believe the task is fully done, stop. The review loop stop hook will automatically:
-1. Prepare a Codex runner script and prompt file
+When you believe the task is fully done, prepare it for review by Codex:
+
+1. Commit any remaining changes on a feature branch (not `main`/`master`).
+2. Push the branch: `git push -u origin <branch_name>` (use the current branch name from `git branch --show-current`).
+3. Open a pull request and capture the PR URL it prints. Pick the CLI that matches the remote:
+   - GitHub remote: `gh pr create`
+   - Gitea remote (gitea.com or self-hosted): `tea pr create` (use `tea pr create --output simple` or follow up with `tea pr list --output json` if you need to parse the URL)
+   Check `git remote -v` if you're not sure which to use.
+4. Record the PR URL in `.claude/review-loop.local.md` by inserting a `related_pr: <pr_url>` line inside the YAML frontmatter (above the closing `---`). Use the Edit tool — do not rewrite the whole file.
+5. Then stop.
+
+The review loop stop hook will then automatically:
+1. Prepare a Codex runner script and prompt file (scoped to the PR you just opened)
 2. Block your exit with instructions to run the review
 
 You will then run `bash .claude/review-loop-run-codex.sh` to execute the Codex review (output streams to the user for visibility). After Codex finishes, read the review file and address the findings.
@@ -37,4 +48,5 @@ You will then run `bash .claude/review-loop-run-codex.sh` to execute the Codex r
 RULES:
 - Complete the task to the best of your ability before stopping
 - Do not stop prematurely or skip parts of the task
+- You MUST push the branch and create the PR before stopping — the Codex review is scoped to that PR
 - When blocked by the hook, run the Codex script as instructed and address the review
