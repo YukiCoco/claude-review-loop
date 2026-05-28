@@ -31,7 +31,7 @@ After setup completes successfully, assess the task complexity. For complex task
 When you believe the task is fully done, prepare it for review by Codex:
 
 1. Commit any remaining changes on a feature branch (not `main`/`master`).
-2. Push the branch: `git push -u origin <branch_name>` (use the current branch name from `git branch --show-current`).
+2. Push the branch yourself first. You MUST attempt `git push -u origin <branch_name>` before asking the user to do anything manually (use the current branch name from `git branch --show-current`). Only if that push fails because of authentication, permissions, network access, or another external blocker should you ask the user to manually push the branch, and include the exact command they should run.
 3. Open a pull request and capture the PR URL it prints. Pick the CLI that matches the remote:
    - GitHub remote: `gh pr create`
    - Gitea remote (gitea.com or self-hosted): `tea pr create` (use `tea pr create --output simple` or follow up with `tea pr list --output json` if you need to parse the URL)
