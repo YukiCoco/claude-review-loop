@@ -1,25 +1,46 @@
 ---
 description: "Cancel an active review loop"
 allowed-tools:
-  - Bash(test -f .claude/review-loop.local.md *)
-  - Bash(rm -f .claude/review-loop.local.md .claude/review-loop.lock .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt)
+  - Bash
   - Read
 ---
 
-Check if a review loop is active:
+Locate the project root by walking up from the current working directory
+until a parent containing `.claude/review-loop.local.md` is found. This
+mirrors the stop hook so `/cancel-review` works even when the caller's
+CWD is a worktree (or any other subdirectory) of the project where the
+loop was started.
 
 ```bash
-test -f .claude/review-loop.local.md && echo "ACTIVE" || echo "NONE"
+project_root=""
+d=$(pwd -P)
+while [ "$d" != "/" ]; do
+  if [ -f "$d/.claude/review-loop.local.md" ]; then
+    project_root=$d
+    break
+  fi
+  d=$(dirname "$d")
+done
+
+if [ -z "$project_root" ]; then
+  echo "NONE"
+else
+  echo "ACTIVE: $project_root"
+fi
 ```
 
-If active, read `.claude/review-loop.local.md` to get the current phase and review ID.
+If no active loop was found, report: "No active review loop found." and stop.
 
-Then remove the state file, lock file, and any generated Codex files:
+Otherwise read `${project_root}/.claude/review-loop.local.md` to capture
+the current phase and review ID, then remove the state file, lock file,
+and any generated Codex artifacts:
 
 ```bash
-rm -f .claude/review-loop.local.md .claude/review-loop.lock .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt
+rm -f "${project_root}/.claude/review-loop.local.md" \
+      "${project_root}/.claude/review-loop.lock" \
+      "${project_root}/.claude/review-loop-run-codex.sh" \
+      "${project_root}/.claude/review-loop-codex-prompt.txt" \
+      "${project_root}/.claude/review-loop-retries"
 ```
 
-Report: "Review loop cancelled (was at phase: X, review ID: Y)"
-
-If no review loop was active, report: "No active review loop found."
+Report: "Review loop cancelled (was at phase: X, review ID: Y)".

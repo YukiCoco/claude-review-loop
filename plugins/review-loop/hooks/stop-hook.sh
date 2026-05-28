@@ -10,19 +10,49 @@
 # Environment variables:
 #   REVIEW_LOOP_CODEX_FLAGS  Override codex flags (default: --dangerously-bypass-approvals-and-sandbox)
 
-LOG_FILE=".claude/review-loop.log"
+# ── Locate the project root ───────────────────────────────────────────────
+# The state file (`.claude/review-loop.local.md`) is created by
+# `/review-loop` in the CWD where the user kicked off the loop. The hook
+# itself, however, fires from whatever CWD Claude happens to be in when it
+# stops — typically the same place, but NOT when the user worked inside a
+# `git worktree` (or any nested subdirectory) after setup. Using a plain
+# relative path here silently approved exit in that case, skipping the
+# Codex review entirely.
+#
+# Walk up from the current directory until we find a parent containing
+# `.claude/review-loop.local.md`. If nothing is found, fall back to CWD so
+# the early "no active loop" branch fires (preserves prior behaviour).
+find_project_root() {
+  local d
+  d=$(pwd -P)
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/.claude/review-loop.local.md" ]; then
+      printf '%s\n' "$d"
+      return 0
+    fi
+    d=$(dirname "$d")
+  done
+  pwd -P
+}
+
+PROJECT_ROOT=$(find_project_root)
+
+STATE_FILE="${PROJECT_ROOT}/.claude/review-loop.local.md"
+LOG_FILE="${PROJECT_ROOT}/.claude/review-loop.log"
+LOCK_FILE="${PROJECT_ROOT}/.claude/review-loop.lock"
+PROMPT_FILE="${PROJECT_ROOT}/.claude/review-loop-codex-prompt.txt"
+RUNNER_SCRIPT="${PROJECT_ROOT}/.claude/review-loop-run-codex.sh"
+RETRY_FILE="${PROJECT_ROOT}/.claude/review-loop-retries"
 
 log() {
   mkdir -p "$(dirname "$LOG_FILE")"
   echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] $*" >> "$LOG_FILE"
 }
 
-trap 'log "ERROR: hook exited via ERR trap (line $LINENO)"; rm -f .claude/review-loop.lock .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt .claude/review-loop-retries; printf "{\"decision\":\"approve\"}\n"; exit 0' ERR
+trap 'log "ERROR: hook exited via ERR trap (line $LINENO)"; rm -f "$LOCK_FILE" "$RUNNER_SCRIPT" "$PROMPT_FILE" "$RETRY_FILE"; printf "{\"decision\":\"approve\"}\n"; exit 0' ERR
 
 # Consume stdin (hook input JSON) — must read to avoid broken pipe
 HOOK_INPUT=$(cat)
-
-STATE_FILE=".claude/review-loop.local.md"
 
 # No active loop → allow exit
 if [ ! -f "$STATE_FILE" ]; then
@@ -56,15 +86,18 @@ if ! echo "$REVIEW_ID" | grep -qE '^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$'; then
 fi
 
 # ── Project type detection ────────────────────────────────────────────────
+# All detection paths are evaluated against ${PROJECT_ROOT}, not the
+# current CWD — otherwise a worktree subdirectory would mis-detect the
+# project type (e.g. miss next.config.js at the real root).
 detect_nextjs() {
-  [ -f "next.config.js" ] || [ -f "next.config.mjs" ] || [ -f "next.config.ts" ] || \
-    ([ -f "package.json" ] && grep -q '"next"' package.json 2>/dev/null)
+  [ -f "${PROJECT_ROOT}/next.config.js" ] || [ -f "${PROJECT_ROOT}/next.config.mjs" ] || [ -f "${PROJECT_ROOT}/next.config.ts" ] || \
+    ([ -f "${PROJECT_ROOT}/package.json" ] && grep -q '"next"' "${PROJECT_ROOT}/package.json" 2>/dev/null)
 }
 
 detect_browser_ui() {
   # Has HTML/JSX/TSX files in app/ or pages/ or src/ directories, or has a public/ dir
-  [ -d "app" ] || [ -d "pages" ] || [ -d "src/app" ] || [ -d "src/pages" ] || \
-    [ -d "public" ] || [ -f "index.html" ]
+  [ -d "${PROJECT_ROOT}/app" ] || [ -d "${PROJECT_ROOT}/pages" ] || [ -d "${PROJECT_ROOT}/src/app" ] || [ -d "${PROJECT_ROOT}/src/pages" ] || \
+    [ -d "${PROJECT_ROOT}/public" ] || [ -f "${PROJECT_ROOT}/index.html" ]
 }
 
 # ── Build the multi-agent review prompt ───────────────────────────────────
@@ -380,8 +413,8 @@ case "$PHASE" in
     # Instead of running Codex inside this hook (which blocks Claude and
     # hides all output), we write the prompt and a runner script, then tell
     # Claude to execute it via Bash so Codex output streams to the user.
-    REVIEW_FILE="reviews/review-${REVIEW_ID}.md"
-    mkdir -p reviews
+    REVIEW_FILE="${PROJECT_ROOT}/reviews/review-${REVIEW_ID}.md"
+    mkdir -p "${PROJECT_ROOT}/reviews"
 
     CODEX_PROMPT=$(build_review_prompt "$REVIEW_FILE" "$RELATED_PR")
 
@@ -418,15 +451,20 @@ Then run /review-loop again."
     fi
 
     # Write prompt to file for the runner script to read
-    PROMPT_FILE=".claude/review-loop-codex-prompt.txt"
     printf '%s' "$CODEX_PROMPT" > "$PROMPT_FILE"
 
     # Generate runner script that Claude will execute via Bash tool.
-    # ${CODEX_FLAGS} expands at write time to bake in the flags value.
-    # All other $ are escaped so they stay literal in the generated script.
-    RUNNER_SCRIPT=".claude/review-loop-run-codex.sh"
+    # The runner `cd`s into PROJECT_ROOT first so its relative paths
+    # (.claude/…, reviews/…) match the hook's view even when Claude's
+    # CWD is a worktree or other subdirectory. ${CODEX_FLAGS} and
+    # ${PROJECT_ROOT} expand at write time to bake their values in;
+    # all other $ are escaped so they stay literal in the script.
     cat > "$RUNNER_SCRIPT" << RUNNER_EOF
 #!/usr/bin/env bash
+# Anchor to the project root so relative paths line up with the hook's
+# expectations regardless of the caller's CWD.
+cd "${PROJECT_ROOT}" || { echo "ERROR: cannot cd to ${PROJECT_ROOT}" >&2; exit 1; }
+
 LOG_FILE=".claude/review-loop.log"
 log() { echo "[\$(date -u +"%Y-%m-%dT%H:%M:%SZ")] \$*" >> "\$LOG_FILE"; }
 
@@ -464,7 +502,7 @@ RUNNER_EOF
 
 Execute this command (use a 600000ms timeout since reviews can take several minutes):
 \`\`\`
-bash .claude/review-loop-run-codex.sh
+bash ${RUNNER_SCRIPT}
 \`\`\`
 
 After the review completes, read ${REVIEW_FILE} and address the findings:
@@ -481,20 +519,19 @@ Use your own judgment. Do not blindly accept every suggestion."
 
     jq -n --arg r "$REASON" --arg s "$SYS_MSG" \
       '{decision:"block", reason:$r, systemMessage:$s}' 2>/dev/null \
-      || printf '{"decision":"block","reason":"Phase 1 complete. Run: bash .claude/review-loop-run-codex.sh then address the review.","systemMessage":"%s"}\n' "$SYS_MSG"
+      || printf '{"decision":"block","reason":"Phase 1 complete. Run: bash %s then address the review.","systemMessage":"%s"}\n' "$RUNNER_SCRIPT" "$SYS_MSG"
     ;;
 
   addressing)
     # ── Phase 2: verify review was actually produced before allowing exit ──
-    REVIEW_FILE="reviews/review-${REVIEW_ID}.md"
+    REVIEW_FILE="${PROJECT_ROOT}/reviews/review-${REVIEW_ID}.md"
     if [ -f "$REVIEW_FILE" ]; then
       # Review exists — success
       log "Review loop complete (review_id=$REVIEW_ID)"
-      rm -f "$STATE_FILE" .claude/review-loop.lock .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt .claude/review-loop-retries
+      rm -f "$STATE_FILE" "$LOCK_FILE" "$RUNNER_SCRIPT" "$PROMPT_FILE" "$RETRY_FILE"
       printf '{"decision":"approve"}\n'
-    elif [ -f ".claude/review-loop-run-codex.sh" ]; then
+    elif [ -f "$RUNNER_SCRIPT" ]; then
       # Runner script exists but review doesn't — check retry limit
-      RETRY_FILE=".claude/review-loop-retries"
       RETRY_COUNT=0
       if [ -f "$RETRY_FILE" ]; then
         RETRY_COUNT=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
@@ -504,7 +541,7 @@ Use your own judgment. Do not blindly accept every suggestion."
       if [ "$RETRY_COUNT" -ge 2 ]; then
         # Already told Claude to run the script once — Codex failed, don't retry
         log "ERROR: Codex failed to produce review, failing open (review_id=$REVIEW_ID)"
-        rm -f "$STATE_FILE" .claude/review-loop.lock .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt "$RETRY_FILE"
+        rm -f "$STATE_FILE" "$LOCK_FILE" "$RUNNER_SCRIPT" "$PROMPT_FILE" "$RETRY_FILE"
         printf '{"decision":"approve"}\n'
       else
         echo "$RETRY_COUNT" > "$RETRY_FILE"
@@ -512,19 +549,19 @@ Use your own judgment. Do not blindly accept every suggestion."
         REASON="The Codex review has not been completed yet. Please run the review script (use a 600000ms timeout since reviews can take several minutes):
 
 \`\`\`
-bash .claude/review-loop-run-codex.sh
+bash ${RUNNER_SCRIPT}
 \`\`\`
 
 Then read ${REVIEW_FILE} and address the findings."
         SYS_MSG="Review Loop [${REVIEW_ID}] — Codex review not yet complete"
         jq -n --arg r "$REASON" --arg s "$SYS_MSG" \
           '{decision:"block", reason:$r, systemMessage:$s}' 2>/dev/null \
-          || printf '{"decision":"block","reason":"Codex review not yet complete. Run: bash .claude/review-loop-run-codex.sh","systemMessage":"%s"}\n' "$SYS_MSG"
+          || printf '{"decision":"block","reason":"Codex review not yet complete. Run: bash %s","systemMessage":"%s"}\n' "$RUNNER_SCRIPT" "$SYS_MSG"
       fi
     else
       # Neither review nor runner script — orphaned state, fail-open
       log "ERROR: review file and runner script both missing, cleaning up (review_id=$REVIEW_ID)"
-      rm -f "$STATE_FILE" .claude/review-loop.lock .claude/review-loop-codex-prompt.txt .claude/review-loop-retries
+      rm -f "$STATE_FILE" "$LOCK_FILE" "$PROMPT_FILE" "$RETRY_FILE"
       printf '{"decision":"approve"}\n'
     fi
     ;;
@@ -532,7 +569,7 @@ Then read ${REVIEW_FILE} and address the findings."
   *)
     # Unknown phase — clean up and allow exit
     log "WARN: unknown phase '$PHASE', cleaning up"
-    rm -f "$STATE_FILE" .claude/review-loop.lock .claude/review-loop-run-codex.sh .claude/review-loop-codex-prompt.txt
+    rm -f "$STATE_FILE" "$LOCK_FILE" "$RUNNER_SCRIPT" "$PROMPT_FILE"
     printf '{"decision":"approve"}\n'
     ;;
 esac
